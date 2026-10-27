@@ -249,6 +249,8 @@ jobs:
         run: |
           python3 integration/scripts/verify_integration.py lock
           python3 integration/scripts/verify_integration.py build
+      - name: Align module catalog test fixture with this source matrix
+        run: python3 scripts/refresh_module_catalog_fixture.py --app app
       - name: Test, lint, and build the signed App
         working-directory: app
         env:
