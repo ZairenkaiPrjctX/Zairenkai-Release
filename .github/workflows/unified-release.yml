@@ -218,7 +218,10 @@ jobs:
           echo "ZAIRENKAI_RELEASE_KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
           key_id=$(openssl pkey -in "$RUNNER_TEMP/module-signing.pem" -pubout -outform DER | sha256sum | cut -d' ' -f1)
           python3 -c 'import json,sys; sys.exit(sys.argv[1] not in {k["key_id"] for k in json.load(open(sys.argv[2]))["keys"]})' \
-            "$key_id" app/integration/module-trust.json || { echo "::error::Module signing key is not trusted by this App source."; exit 1; }
+            "$key_id" app/integration/module-trust.json || {
+              echo "::error::Module signing public key id $key_id is not trusted by this App source. Add this public key to app/integration/module-trust.json, or configure the matching ZAIRENKAI_MODULE_SIGNING_KEY in the Release environment."
+              exit 1
+            }
           "$JAVA_HOME_17_X64/bin/keytool" -list -keystore "$RUNNER_TEMP/release.jks" \
             -storepass:env ZAIRENKAI_RELEASE_KEYSTORE_PASSWORD -alias "$ZAIRENKAI_RELEASE_KEY_ALIAS" >/dev/null
       - name: Install verified Android and Rust build toolchains
