@@ -8,20 +8,16 @@ put detail in `AGENT/`.
 
 ## Current state (read first)
 
-As of 2026-10-18 this repository contained **no source code** (GitHub API 2026-10-18: repository size 0, no branches, no commits; ls-remote returned no refs.).
-Until that changes:
-
-- Do not describe an architecture, language, or toolchain as fact. Record discoveries in
-  `AGENT/PROJECT_CONTEXT.md` with evidence (file paths, manifests, command output).
-- When the first real code lands, update this file's **Commands** table and
-  `AGENT/ARCHITECTURE.md` in the same pull request.
+This repository contains the source matrix builder and central App/Modules release workflow.
+See `AGENT/ARCHITECTURE.md` and `AGENT/PROJECT_CONTEXT.md` for verified behavior and rollout
+conditions. The workflow has not yet published a release.
 
 ## Commands
 
 | Purpose | Command | Status |
 |---|---|---|
-| Build | — | Not Configured |
-| Test | — | Not Configured |
+| Build and publish | GitHub Actions `Unified Zairenkai Matrix Release` | Configured; needs documented secrets and rollout conditions |
+| Builder tests | `python3 -m unittest discover -s tests -v` | Configured |
 | Lint / format | — | Not Configured |
 | Validate agent foundation | `python3 <path-to-.github>/agent-foundation/scripts/validate_agent_setup.py .` | Configured |
 

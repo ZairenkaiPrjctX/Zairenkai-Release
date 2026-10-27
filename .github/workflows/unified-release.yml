@@ -1,0 +1,374 @@
+name: Unified Zairenkai Matrix Release
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: Build and publish even if source revisions match the latest complete release
+        type: boolean
+        default: true
+  push:
+    branches: [dev]
+    paths:
+      - '.github/workflows/unified-release.yml'
+      - 'build/**'
+      - 'scripts/**'
+      - 'docs/**'
+      - 'AGENT/ARCHITECTURE.md'
+      - 'AGENT/PROJECT_CONTEXT.md'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zairenkai-unified-release
+  cancel-in-progress: false
+
+env:
+  NDK_VERSION: r27d
+  NDK_SHA256: 601246087a682d1944e1e16dd85bc6e49560fe8b6d61255be2829178c8ed15d9
+  RUST_STABLE: '1.97.0'
+
+jobs:
+  resolve:
+    name: resolve immutable source matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+      app_commit: ${{ steps.resolve.outputs.app_commit }}
+      modules_commit: ${{ steps.resolve.outputs.modules_commit }}
+      engine_commit: ${{ steps.resolve.outputs.engine_commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Resolve all included repositories
+        id: resolve
+        run: |
+          python3 scripts/resolve_sources.py --output "$RUNNER_TEMP/source-heads.json"
+          python3 - "$RUNNER_TEMP/source-heads.json" "$GITHUB_OUTPUT" <<'PY'
+          import json, sys
+          data = json.load(open(sys.argv[1], encoding='utf-8'))
+          rows = data['repositories']
+          matrix = {'include': [{'name': r['name'], 'repository': r['repository'], 'sha': r['sha']} for r in rows]}
+          commits = {r['name']: r['sha'] for r in rows}
+          with open(sys.argv[2], 'a', encoding='utf-8') as out:
+              out.write('matrix=' + json.dumps(matrix, separators=(',', ':')) + '\n')
+              out.write('app_commit=' + commits['Zairenkai-App'] + '\n')
+              out.write('modules_commit=' + commits['Zairenkai-Modules'] + '\n')
+              out.write('engine_commit=' + commits['Zairenkai-Intelligence-Engine'] + '\n')
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: source-heads
+          path: ${{ runner.temp }}/source-heads.json
+          if-no-files-found: error
+          retention-days: 7
+
+  verify-matrix:
+    name: verify ${{ matrix.name }} at ${{ matrix.sha }}
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ matrix.repository }}
+          ref: ${{ matrix.sha }}
+          path: source
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ZairenkaiPrjctX/Zairenkai-Release
+          ref: ${{ github.sha }}
+          path: release-tools
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Prove checkout matches the resolved commit
+        run: python3 release-tools/scripts/verify_checkout.py --repository '${{ matrix.repository }}' --expected '${{ matrix.sha }}' --path source
+
+  detect-changes:
+    name: determine whether both product releases are current
+    needs: [resolve, verify-matrix]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      changed: ${{ steps.detect.outputs.changed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@900082e5aac5ba805825da76410c181273ba90b1 # v8.0.2
+        with:
+          name: source-heads
+          path: ${{ runner.temp }}/matrix
+      - name: Compare source matrix and complete App/Modules releases
+        id: detect
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          FORCE_BUILD: ${{ inputs.force_build }}
+        run: |
+          changed=false
+          if [ "$EVENT_NAME" != schedule ] && { [ "$EVENT_NAME" != workflow_dispatch ] || [ "$FORCE_BUILD" = true ]; }; then
+            changed=true
+          else
+            changed=$(python3 scripts/has_source_changes.py --matrix "$RUNNER_TEMP/matrix/source-heads.json")
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          echo "Source matrix requires a complete build: $changed" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: full source build, tests, provenance, and signed APK
+    needs: [resolve, verify-matrix, detect-changes]
+    if: needs.detect-changes.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@900082e5aac5ba805825da76410c181273ba90b1 # v8.0.2
+        with:
+          name: source-heads
+          path: ${{ runner.temp }}/matrix
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ZairenkaiPrjctX/Zairenkai-App
+          ref: ${{ needs.resolve.outputs.app_commit }}
+          path: app
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ZairenkaiPrjctX/Zairenkai-Modules
+          ref: ${{ needs.resolve.outputs.modules_commit }}
+          path: modules-source
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ZairenkaiPrjctX/Zairenkai-Intelligence-Engine
+          ref: ${{ needs.resolve.outputs.engine_commit }}
+          path: engine-source
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Require every release secret before building
+        env:
+          HAS_MODULE_KEY: ${{ secrets.ZAIRENKAI_MODULE_SIGNING_KEY != '' }}
+          HAS_KEYSTORE: ${{ secrets.ZAIRENKAI_RELEASE_KEYSTORE_BASE64 != '' }}
+          HAS_STORE_PASSWORD: ${{ secrets.ZAIRENKAI_RELEASE_KEYSTORE_PASSWORD != '' }}
+          HAS_KEY_ALIAS: ${{ secrets.ZAIRENKAI_RELEASE_KEY_ALIAS != '' }}
+          HAS_KEY_PASSWORD: ${{ secrets.ZAIRENKAI_RELEASE_KEY_PASSWORD != '' }}
+        run: |
+          missing=""
+          [ "$HAS_MODULE_KEY" = true ] || missing="$missing ZAIRENKAI_MODULE_SIGNING_KEY"
+          [ "$HAS_KEYSTORE" = true ] || missing="$missing ZAIRENKAI_RELEASE_KEYSTORE_BASE64"
+          [ "$HAS_STORE_PASSWORD" = true ] || missing="$missing ZAIRENKAI_RELEASE_KEYSTORE_PASSWORD"
+          [ "$HAS_KEY_ALIAS" = true ] || missing="$missing ZAIRENKAI_RELEASE_KEY_ALIAS"
+          [ "$HAS_KEY_PASSWORD" = true ] || missing="$missing ZAIRENKAI_RELEASE_KEY_PASSWORD"
+          if [ -n "$missing" ]; then
+            echo "::error::Build blocked; configure the named secrets in Zairenkai-Release's release environment:$missing"
+            exit 1
+          fi
+      - name: Run Modules and Intelligence Engine host suites
+        run: |
+          python3 -m unittest discover -s modules-source/tests -v
+          python3 -m venv "$RUNNER_TEMP/engine-venv"
+          "$RUNNER_TEMP/engine-venv/bin/pip" install --require-hashes -r engine-source/requirements.lock
+          (cd engine-source && "$RUNNER_TEMP/engine-venv/bin/python" -m unittest discover -s tests -t . -v)
+      - name: Select monotonic release versions and prepare exact source locks
+        id: prepare
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          versions=$(python3 scripts/select_versions.py --app-gradle app/app/build.gradle.kts --module-lock modules-source/components.lock.json)
+          app_version=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["app_version"])' "$versions")
+          module_version=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["module_version"])' "$versions")
+          python3 scripts/prepare_build.py \
+            --app app --modules modules-source --matrix "$RUNNER_TEMP/matrix/source-heads.json" \
+            --app-version "$app_version" --module-version "$module_version" \
+            --app-notes "$RUNNER_TEMP/app-notes.md" --module-notes "$RUNNER_TEMP/module-notes.md"
+          echo "app_version=$app_version" >> "$GITHUB_OUTPUT"
+          echo "module_version=$module_version" >> "$GITHUB_OUTPUT"
+      - name: Install release keys in runner temporary storage
+        env:
+          MODULE_KEY: ${{ secrets.ZAIRENKAI_MODULE_SIGNING_KEY }}
+          KEYSTORE_BASE64: ${{ secrets.ZAIRENKAI_RELEASE_KEYSTORE_BASE64 }}
+          ZAIRENKAI_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ZAIRENKAI_RELEASE_KEYSTORE_PASSWORD }}
+          ZAIRENKAI_RELEASE_KEY_ALIAS: ${{ secrets.ZAIRENKAI_RELEASE_KEY_ALIAS }}
+        run: |
+          umask 077
+          printf '%s\n' "$MODULE_KEY" > "$RUNNER_TEMP/module-signing.pem"
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "ZAIRENKAI_MODULE_SIGNING_KEY_FILE=$RUNNER_TEMP/module-signing.pem" >> "$GITHUB_ENV"
+          echo "ZAIRENKAI_RELEASE_KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+          key_id=$(openssl pkey -in "$RUNNER_TEMP/module-signing.pem" -pubout -outform DER | sha256sum | cut -d' ' -f1)
+          python3 -c 'import json,sys; sys.exit(sys.argv[1] not in {k["key_id"] for k in json.load(open(sys.argv[2]))["keys"]})' \
+            "$key_id" app/integration/module-trust.json || { echo "::error::Module signing key is not trusted by this App source."; exit 1; }
+          "$JAVA_HOME_17_X64/bin/keytool" -list -keystore "$RUNNER_TEMP/release.jks" \
+            -storepass:env ZAIRENKAI_RELEASE_KEYSTORE_PASSWORD -alias "$ZAIRENKAI_RELEASE_KEY_ALIAS" >/dev/null
+      - name: Install verified Android and Rust build toolchains
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q ninja-build
+          rustup toolchain install "$RUST_STABLE" --profile minimal -t aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+          rustup default "$RUST_STABLE"
+          curl --fail --show-error --location --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 20 --max-time 1200 \
+            -o "$RUNNER_TEMP/ndk.zip" "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
+          echo "${NDK_SHA256}  $RUNNER_TEMP/ndk.zip" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/ndk.zip" -d "$RUNNER_TEMP"
+          echo "ANDROID_NDK_HOME=$RUNNER_TEMP/android-ndk-${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
+          echo "sdk.dir=$ANDROID_HOME" > app/local.properties
+      - name: Build every locked component and the signed module catalog
+        working-directory: app
+        env:
+          ZAIRENKAI_MODULE_COMPONENTS_LOCK: ${{ github.workspace }}/modules-source/components.lock.json
+          ZAIRENKAI_MODULE_VERSION: ${{ steps.prepare.outputs.module_version }}
+          ZAIRENKAI_MODULE_RELEASE_NOTES_FILE: ${{ runner.temp }}/module-notes.md
+        run: integration/scripts/build-components.sh
+      - name: Verify the full integration lock and built components
+        working-directory: app
+        run: |
+          python3 integration/scripts/verify_integration.py lock
+          python3 integration/scripts/verify_integration.py build
+      - name: Test, lint, and build the signed App
+        working-directory: app
+        env:
+          ZAIRENKAI_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ZAIRENKAI_RELEASE_KEYSTORE_PASSWORD }}
+          ZAIRENKAI_RELEASE_KEY_ALIAS: ${{ secrets.ZAIRENKAI_RELEASE_KEY_ALIAS }}
+          ZAIRENKAI_RELEASE_KEY_PASSWORD: ${{ secrets.ZAIRENKAI_RELEASE_KEY_PASSWORD }}
+          APP_VERSION: ${{ steps.prepare.outputs.app_version }}
+        run: ./gradlew --no-daemon :integration-core:test :app:testDebugUnitTest lint assembleRelease "-Pzairenkai.appVersion=$APP_VERSION"
+      - name: Verify APK signature and release policy
+        working-directory: app
+        run: |
+          apk=app/build/outputs/apk/release/app-release.apk
+          apksigner=$(printf '%s\n' "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          "$apksigner" verify --verbose --print-certs "$apk" > "$RUNNER_TEMP/apksigner.txt"
+          grep -E '^Verified using|certificate (DN|SHA-256 digest)' "$RUNNER_TEMP/apksigner.txt" >> "$GITHUB_STEP_SUMMARY"
+          python3 integration/scripts/verify_integration.py report "$apk" --release
+      - name: Stage product assets and complete source provenance
+        working-directory: app
+        env:
+          APP_VERSION: ${{ steps.prepare.outputs.app_version }}
+          MODULE_VERSION: ${{ steps.prepare.outputs.module_version }}
+          APP_COMMIT: ${{ needs.resolve.outputs.app_commit }}
+          MODULE_COMMIT: ${{ needs.resolve.outputs.modules_commit }}
+          BUILDER_COMMIT: ${{ github.sha }}
+        run: |
+          stage="$RUNNER_TEMP/release-stage"
+          module_out=integration/out/src/zairenkai-module/dist
+          module_zip="$module_out/zairenkai-v${MODULE_VERSION}.zip"
+          test -s "$module_zip"
+          test -s integration/out/assets/system-modules/zairenkai.zip
+          cmp "$module_zip" integration/out/assets/system-modules/zairenkai.zip
+          apk="app/build/outputs/apk/release/app-release.apk"
+          mkdir -p "$stage"
+          cp "$apk" "$stage/zairenkai-${APP_VERSION}.apk"
+          cp "$module_zip" "$stage/zairenkai-v${MODULE_VERSION}.zip"
+          cp "$module_out/update.json" "$stage/update.json"
+          cp "$module_out/changelog.md" "$stage/changelog.md"
+          cp "$RUNNER_TEMP/app-notes.md" "$stage/app-notes.md"
+          python3 "$GITHUB_WORKSPACE/scripts/create_build_manifest.py" \
+            --matrix "$RUNNER_TEMP/matrix/source-heads.json" --output "$stage" \
+            --app-version "$APP_VERSION" --module-version "$MODULE_VERSION" \
+            --app-commit "$APP_COMMIT" --module-commit "$MODULE_COMMIT" \
+            --builder-commit "$BUILDER_COMMIT" \
+            --apk "$stage/zairenkai-${APP_VERSION}.apk" \
+            --module-zip "$stage/zairenkai-v${MODULE_VERSION}.zip" \
+            --components integration/out/components.json
+          { cd "$stage"; sha256sum "zairenkai-${APP_VERSION}.apk" "zairenkai-${APP_VERSION}.apk.sha256" \
+            build-manifest.json build-manifest.json.sha256 update.json app-notes.md > SHA256SUMS-app; }
+          { cd "$stage"; sha256sum "zairenkai-v${MODULE_VERSION}.zip" "zairenkai-v${MODULE_VERSION}.zip.sha256" \
+            build-manifest.json build-manifest.json.sha256 update.json changelog.md > SHA256SUMS-module; }
+          mkdir -p "$stage/app-release" "$stage/module-release"
+          cp "$stage/zairenkai-${APP_VERSION}.apk" "$stage/zairenkai-${APP_VERSION}.apk.sha256" \
+            "$stage/build-manifest.json" "$stage/build-manifest.json.sha256" "$stage/update.json" \
+            "$stage/app-notes.md" "$stage/SHA256SUMS-app" "$stage/app-release/"
+          cp "$stage/zairenkai-v${MODULE_VERSION}.zip" "$stage/zairenkai-v${MODULE_VERSION}.zip.sha256" \
+            "$stage/build-manifest.json" "$stage/build-manifest.json.sha256" "$stage/update.json" \
+            "$stage/changelog.md" "$stage/SHA256SUMS-module" "$stage/module-release/"
+          cp "$RUNNER_TEMP/matrix/source-heads.json" "$stage/source-heads.json"
+      - name: Remove signing material
+        if: always()
+        run: rm -f "$RUNNER_TEMP/module-signing.pem" "$RUNNER_TEMP/release.jks"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: zairenkai-release-candidate
+          path: ${{ runner.temp }}/release-stage/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish central App and Modules releases
+    needs: [build, resolve, detect-changes]
+    if: needs.detect-changes.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@900082e5aac5ba805825da76410c181273ba90b1 # v8.0.2
+        with:
+          name: zairenkai-release-candidate
+          path: release-candidate
+      - name: Verify candidate checksums and manifest
+        run: |
+          (cd release-candidate && sha256sum -c SHA256SUMS-app && sha256sum -c SHA256SUMS-module)
+          python3 - <<'PY'
+          import json, pathlib
+          p = pathlib.Path('release-candidate/build-manifest.json')
+          d = json.loads(p.read_text())
+          assert d['verification'] == {'matrix': 'passed', 'integration': 'passed', 'release_gate': 'passed', 'signature': 'passed'}
+          assert len(d['source_repositories']) == 15
+          print('verified release manifest for', d['app']['version'], d['module']['version'])
+          PY
+      - name: Publish the module first, then the App with the same update feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          app_version=$(python3 -c 'import json; print(json.load(open("release-candidate/build-manifest.json"))["app"]["version"])')
+          module_version=$(python3 -c 'import json; print(json.load(open("release-candidate/build-manifest.json"))["module"]["version"])')
+          module_tag="module-v${module_version}"
+          app_tag="v${app_version}"
+          if gh release view "$module_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Refusing to replace immutable module release $module_tag"; exit 1
+          fi
+          if gh release view "$app_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Refusing to replace immutable App release $app_tag"; exit 1
+          fi
+          gh release create "$module_tag" --repo "$GITHUB_REPOSITORY" --title "Zairenkai Module $module_version" \
+            --notes-file release-candidate/module-release/changelog.md \
+            release-candidate/module-release/zairenkai-v"$module_version".zip \
+            release-candidate/module-release/zairenkai-v"$module_version".zip.sha256 \
+            release-candidate/module-release/update.json release-candidate/module-release/changelog.md \
+            release-candidate/module-release/build-manifest.json release-candidate/module-release/build-manifest.json.sha256 \
+            release-candidate/module-release/SHA256SUMS-module
+          gh release create "$app_tag" --repo "$GITHUB_REPOSITORY" --title "Zairenkai $app_version" \
+            --notes-file release-candidate/app-release/app-notes.md \
+            release-candidate/app-release/zairenkai-"$app_version".apk \
+            release-candidate/app-release/zairenkai-"$app_version".apk.sha256 \
+            release-candidate/app-release/update.json release-candidate/app-release/build-manifest.json \
+            release-candidate/app-release/build-manifest.json.sha256 release-candidate/app-release/SHA256SUMS-app
+          {
+            echo "## Published central matrix release"
+            echo "- App: $app_tag"
+            echo "- Module: $module_tag"
+            echo "- Source repositories: 15"
+            echo "- Every downloadable artifact has a SHA-256 checksum and build-manifest.json."
+          } >> "$GITHUB_STEP_SUMMARY"

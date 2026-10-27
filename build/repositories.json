@@ -1,0 +1,28 @@
+{
+  "format": 1,
+  "owner": "ZairenkaiPrjctX",
+  "ref": "dev",
+  "excluded": [
+    {
+      "repository": "ZairenkaiPrjctX/anime-extensions",
+      "reason": "Separate product; explicitly excluded from the Zairenkai device ecosystem."
+    }
+  ],
+  "repositories": [
+    {"name": ".github", "role": "organization engineering policy and agent foundation"},
+    {"name": "Zairenkai-App", "role": "Android application source"},
+    {"name": "Zairenkai-Modules", "role": "root module assembler and installer source"},
+    {"name": "Zairenkai-Core", "role": "policy control plane"},
+    {"name": "Zairenkai-FAS", "role": "frame-aware service"},
+    {"name": "Zairenkai-Tuning", "role": "telemetry and validated tuning program"},
+    {"name": "Zairenkai-ART", "role": "ART component"},
+    {"name": "Zairenkai-ThermalTools", "role": "thermal tools component"},
+    {"name": "Zairenkai-Intelligence-Engine", "role": "offline local AI runtime and contracts"},
+    {"name": "Zairenkai-Sdk", "role": "canonical integration contracts"},
+    {"name": "Zairenkai-Database-Source", "role": "attributed device candidate data"},
+    {"name": "Zairenkai-Graphics-Platform", "role": "graphics platform probe; not currently packaged by App"},
+    {"name": "Zairenkai-License-Server", "role": "licensing source; no runtime implementation currently exists"},
+    {"name": "Zairenkai-Docs", "role": "ecosystem documentation"},
+    {"name": "ZairenkaiPrjctX.github.io", "role": "project website"}
+  ]
+}

@@ -1,45 +1,47 @@
 # Project context: Zairenkai-Release
 
-> Owned by this repository. Update it whenever verified facts change. Label every statement
-> **Verified** (with `Evidence:`), **Unverified**, or **Unknown / Not Configured**.
-
 ## Identity
 
 | Field | Value | Status |
 |---|---|---|
-| Repository | `ZairenkaiPrjctX/Zairenkai-Release` | Verified. Evidence: GitHub API |
-| GitHub description | Release Build Zairenkai | Verified. Evidence: GitHub API |
-| Visibility | private | Verified. Evidence: GitHub API |
-| Configured default branch | `main` (no commits exist on it yet) | Verified. Evidence: GitHub API |
-| Purpose | Release automation, artifacts, signing, and publication. | **Unverified**: rollout hint, not derived from code |
+| Repository | `ZairenkaiPrjctX/Zairenkai-Release` | Verified. Evidence: configured Git origin. |
+| Visibility | public | Verified. Evidence: anonymous GitHub API repository metadata, 2026-10-27. |
+| Working/default branch | `dev` | Verified. Evidence: anonymous GitHub API `default_branch` and `origin/HEAD -> origin/dev`, 2026-10-27. |
+| Purpose | Matrix builder and central App/Modules release publisher | Verified. Evidence: `.github/workflows/unified-release.yml`. |
 
-## Contents
+## Architecture and commands
 
-**Unknown / Not Configured.** On 2026-10-18 the repository was empty. Evidence: GitHub API 2026-10-18: repository size 0, no branches, no commits; ls-remote returned no refs.
-The only files present are the agent foundation itself.
+See `AGENT/ARCHITECTURE.md`. The workflow uses Python 3 standard library scripts and GitHub
+Actions; App and Modules supply their own Gradle, Python, Android NDK, Rust, and signing steps.
 
-## Key components
+| Purpose | Command | Status |
+|---|---|---|
+| Resolve matrix | `python3 scripts/resolve_sources.py --output <path>` | Configured; live run requires GitHub source access. |
+| Test builder scripts | `python3 -m unittest discover -s tests -v` | Configured. |
+| Validate source checkout | `python3 scripts/verify_checkout.py --repository <owner/repo> --expected <sha> --path <checkout>` | Configured. |
+| Build and publish | GitHub Actions `Unified Zairenkai Matrix Release` | Configured; requires release environment secrets and workflow rollout. |
+| Validate agent foundation | `python3 <path-to-.github>/agent-foundation/scripts/validate_agent_setup.py .` | Configured. |
 
-Unknown. Nothing to list until source code exists.
+## Workflow facts and rollout conditions
 
-## Build, test, and run
-
-Not Configured. No manifests, build scripts, or CI workflows exist.
-
-## Authoritative sources
-
-| Topic | Source |
-|---|---|
-| Repository facts | this file |
-| Architecture | `AGENT/ARCHITECTURE.md` |
-| Organization standards | `ZairenkaiPrjctX/.github` → `agent-foundation/standards/` |
-| Repository list and relationships | `ZairenkaiPrjctX/.github` → `agent-foundation/inventory/repositories.json` |
+- `build/repositories.json` lists 15 public repositories at `dev` and explicitly excludes
+  `anime-extensions`. Anonymous GitHub API metadata checks confirmed all are public and
+  `git ls-remote` confirmed every `dev` ref on 2026-10-27. This verifies ref visibility/existence,
+  not GitHub Actions buildability.
+- The Release repository is public, so anonymous App and root-module update requests can access
+  releases. Anonymous GitHub API returned zero published releases on 2026-10-27, so client
+  download behavior against real central assets is not yet verified.
+- Configure secrets in the Release repository's `release` environment:
+  `ZAIRENKAI_MODULE_SIGNING_KEY`, `ZAIRENKAI_RELEASE_KEYSTORE_BASE64`,
+  `ZAIRENKAI_RELEASE_KEYSTORE_PASSWORD`, `ZAIRENKAI_RELEASE_KEY_ALIAS`, and
+  `ZAIRENKAI_RELEASE_KEY_PASSWORD`. Names are documented; secret values are not inspected/copied.
+- Scheduled workflows run only from GitHub's configured default branch. Verify that `dev` is
+  still the default branch when rolling out this workflow.
+- Workflow release publishing has not been run. App/Modules client updates, signed outputs,
+  hardware behavior, and public feed access remain unverified until a successful release and
+  device validation.
 
 ## Related repositories
 
-None verified. Record relationships here, with evidence, once code shows them.
-
-## Open questions to answer when code lands
-
-- Which repositories and revisions feed a release build?
-- Where are release artifacts published, and which named secret signs them?
+App and root-module updater clients consume this repository's release feed. The build matrix lists
+their source repositories and their direct components in `build/repositories.json`.
