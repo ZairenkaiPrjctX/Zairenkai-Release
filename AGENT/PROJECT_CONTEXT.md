@@ -41,6 +41,12 @@ Actions; App and Modules supply their own Gradle, Python, Android NDK, Rust, and
   signed App APK and module ZIP as two GitHub prereleases from the same verified source matrix;
   the App's Beta channel offers the APK and recognizes the matching module prerelease. This
   capability is implemented in the current topic change; no beta release has been published.
+- Integrated builds stage the Engine matrix commit's manifest-pinned GGUF unchanged, verify its
+  declared byte size and SHA-256, and publish it under `model-<model_id>-<engine_commit>` in this
+  repository. The generated APK model manifest points to that tag, so Engine source and model
+  provenance use the same exact matrix SHA. The user-triggered model download remains separate
+  from APK installation. This workflow change is not yet run on GitHub; the model source is the
+  prequantized GGUF at the Engine manifest's immutable Hugging Face revision.
 - Workflow release publishing has not been run. App/Modules client updates, signed outputs,
   hardware behavior, and public feed access remain unverified until a successful release and
   device validation.
