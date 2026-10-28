@@ -25,7 +25,9 @@ def digest(path: Path) -> str:
 
 def create(matrix_path: Path, output: Path, app_version: str, module_version: str,
            app_commit: str, module_commit: str, builder_commit: str, apk: Path, module_zip: Path,
-           component_manifest: Path) -> dict:
+           component_manifest: Path, channel: str = "stable") -> dict:
+    if channel not in {"stable", "beta"}:
+        raise ValueError("release channel must be stable or beta")
     if not all(SHA1.fullmatch(value) for value in (app_commit, module_commit, builder_commit)):
         raise ValueError("App, Modules, and builder source commits must be full SHA-1 values")
     matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
@@ -61,6 +63,7 @@ def create(matrix_path: Path, output: Path, app_version: str, module_version: st
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "repository": "ZairenkaiPrjctX/Zairenkai-Release",
         "source_ref": matrix.get("ref"),
+        "channel": channel,
         "builder": {"repository": "ZairenkaiPrjctX/Zairenkai-Release", "commit": builder_commit},
         "app": {"version": app_version, "repository": "ZairenkaiPrjctX/Zairenkai-App", "commit": app_commit},
         "module": {"version": module_version, "repository": "ZairenkaiPrjctX/Zairenkai-Modules", "commit": module_commit},
@@ -90,10 +93,12 @@ def main() -> int:
     parser.add_argument("--apk", type=Path, required=True)
     parser.add_argument("--module-zip", type=Path, required=True)
     parser.add_argument("--components", type=Path, required=True)
+    parser.add_argument("--channel", choices=("stable", "beta"), default="stable")
     args = parser.parse_args()
     try:
         manifest = create(args.matrix, args.output, args.app_version, args.module_version, args.app_commit,
-                          args.module_commit, args.builder_commit, args.apk, args.module_zip, args.components)
+                          args.module_commit, args.builder_commit, args.apk, args.module_zip, args.components,
+                          args.channel)
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
         print(f"create_build_manifest: {exc}", file=sys.stderr)
         return 1

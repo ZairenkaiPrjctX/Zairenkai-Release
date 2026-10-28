@@ -5,6 +5,11 @@ on:
     - cron: '23 */6 * * *'
   workflow_dispatch:
     inputs:
+      channel:
+        description: Build and publish the stable or beta channel
+        type: choice
+        options: [stable, beta]
+        default: stable
       force_build:
         description: Build and publish even if source revisions match the latest complete release
         type: boolean
@@ -41,6 +46,7 @@ jobs:
       app_commit: ${{ steps.resolve.outputs.app_commit }}
       modules_commit: ${{ steps.resolve.outputs.modules_commit }}
       engine_commit: ${{ steps.resolve.outputs.engine_commit }}
+      channel: ${{ steps.resolve.outputs.channel }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -61,6 +67,12 @@ jobs:
               out.write('modules_commit=' + commits['Zairenkai-Modules'] + '\n')
               out.write('engine_commit=' + commits['Zairenkai-Intelligence-Engine'] + '\n')
           PY
+          channel=stable
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            channel='${{ inputs.channel }}'
+          fi
+          case "$channel" in stable|beta) ;; *) echo "::error::Invalid release channel: $channel"; exit 1 ;; esac
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: source-heads
@@ -117,9 +129,10 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
           FORCE_BUILD: ${{ inputs.force_build }}
+          CHANNEL: ${{ needs.resolve.outputs.channel }}
         run: |
           changed=false
-          if [ "$EVENT_NAME" != schedule ] && { [ "$EVENT_NAME" != workflow_dispatch ] || [ "$FORCE_BUILD" = true ]; }; then
+          if [ "$CHANNEL" = beta ] || { [ "$EVENT_NAME" != schedule ] && { [ "$EVENT_NAME" != workflow_dispatch ] || [ "$FORCE_BUILD" = true ]; }; }; then
             changed=true
           else
             changed=$(python3 scripts/has_source_changes.py --matrix "$RUNNER_TEMP/matrix/source-heads.json")
@@ -128,7 +141,7 @@ jobs:
           echo "Source matrix requires a complete build: $changed" >> "$GITHUB_STEP_SUMMARY"
 
   build:
-    name: full source build, tests, provenance, and signed APK
+    name: ${{ needs.resolve.outputs.channel }} source build, tests, provenance, and signed APK
     needs: [resolve, verify-matrix, detect-changes]
     if: needs.detect-changes.outputs.changed == 'true'
     runs-on: ubuntu-24.04
@@ -194,8 +207,9 @@ jobs:
         id: prepare
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ needs.resolve.outputs.channel }}
         run: |
-          versions=$(python3 scripts/select_versions.py --app-gradle app/app/build.gradle.kts --module-lock modules-source/components.lock.json)
+          versions=$(python3 scripts/select_versions.py --app-gradle app/app/build.gradle.kts --module-lock modules-source/components.lock.json --channel "$CHANNEL")
           app_version=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["app_version"])' "$versions")
           module_version=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["module_version"])' "$versions")
           python3 scripts/prepare_build.py \
@@ -275,6 +289,7 @@ jobs:
           APP_COMMIT: ${{ needs.resolve.outputs.app_commit }}
           MODULE_COMMIT: ${{ needs.resolve.outputs.modules_commit }}
           BUILDER_COMMIT: ${{ github.sha }}
+          CHANNEL: ${{ needs.resolve.outputs.channel }}
         run: |
           stage="$RUNNER_TEMP/release-stage"
           module_out=integration/out/src/zairenkai-module/dist
@@ -294,6 +309,7 @@ jobs:
             --app-version "$APP_VERSION" --module-version "$MODULE_VERSION" \
             --app-commit "$APP_COMMIT" --module-commit "$MODULE_COMMIT" \
             --builder-commit "$BUILDER_COMMIT" \
+            --channel "$CHANNEL" \
             --apk "$stage/zairenkai-${APP_VERSION}.apk" \
             --module-zip "$stage/zairenkai-v${MODULE_VERSION}.zip" \
             --components integration/out/components.json
@@ -320,7 +336,7 @@ jobs:
           retention-days: 7
 
   publish:
-    name: publish central App and Modules releases
+    name: publish central ${{ needs.resolve.outputs.channel }} App and Modules releases
     needs: [build, resolve, detect-changes]
     if: needs.detect-changes.outputs.changed == 'true'
     runs-on: ubuntu-24.04
@@ -333,6 +349,8 @@ jobs:
           name: zairenkai-release-candidate
           path: release-candidate
       - name: Verify candidate checksums and manifest
+        env:
+          CHANNEL: ${{ needs.resolve.outputs.channel }}
         run: |
           (cd release-candidate && sha256sum -c SHA256SUMS-app && sha256sum -c SHA256SUMS-module)
           python3 - <<'PY'
@@ -341,30 +359,45 @@ jobs:
           d = json.loads(p.read_text())
           assert d['verification'] == {'matrix': 'passed', 'integration': 'passed', 'release_gate': 'passed', 'signature': 'passed'}
           assert len(d['source_repositories']) == 15
+          assert d['channel'] == __import__('os').environ['CHANNEL']
           print('verified release manifest for', d['app']['version'], d['module']['version'])
           PY
       - name: Publish the module first, then the App with the same update feed
         env:
           GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ needs.resolve.outputs.channel }}
         run: |
           app_version=$(python3 -c 'import json; print(json.load(open("release-candidate/build-manifest.json"))["app"]["version"])')
           module_version=$(python3 -c 'import json; print(json.load(open("release-candidate/build-manifest.json"))["module"]["version"])')
           module_tag="module-v${module_version}"
           app_tag="v${app_version}"
+          module_title="Zairenkai Module $module_version"
+          app_title="Zairenkai $app_version"
+          release_flags=()
+          if [ "$CHANNEL" = beta ]; then
+            release_flags+=(--prerelease)
+            module_title="Zairenkai Module Beta $module_version"
+            app_title="Zairenkai Beta $app_version"
+            case "$app_version" in *-beta.*) ;; *) echo "::error::Beta App version lacks a beta suffix"; exit 1 ;; esac
+          else
+            case "$app_version" in *-beta.*) echo "::error::Stable App version has a beta suffix"; exit 1 ;; esac
+          fi
           if gh release view "$module_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "::error::Refusing to replace immutable module release $module_tag"; exit 1
           fi
           if gh release view "$app_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "::error::Refusing to replace immutable App release $app_tag"; exit 1
           fi
-          gh release create "$module_tag" --repo "$GITHUB_REPOSITORY" --title "Zairenkai Module $module_version" \
+          gh release create "$module_tag" --repo "$GITHUB_REPOSITORY" --title "$module_title" \
+            "${release_flags[@]}" \
             --notes-file release-candidate/module-release/changelog.md \
             release-candidate/module-release/zairenkai-v"$module_version".zip \
             release-candidate/module-release/zairenkai-v"$module_version".zip.sha256 \
             release-candidate/module-release/update.json release-candidate/module-release/changelog.md \
             release-candidate/module-release/build-manifest.json release-candidate/module-release/build-manifest.json.sha256 \
             release-candidate/module-release/SHA256SUMS-module
-          gh release create "$app_tag" --repo "$GITHUB_REPOSITORY" --title "Zairenkai $app_version" \
+          gh release create "$app_tag" --repo "$GITHUB_REPOSITORY" --title "$app_title" \
+            "${release_flags[@]}" \
             --notes-file release-candidate/app-release/app-notes.md \
             release-candidate/app-release/zairenkai-"$app_version".apk \
             release-candidate/app-release/zairenkai-"$app_version".apk.sha256 \
@@ -374,6 +407,7 @@ jobs:
             echo "## Published central matrix release"
             echo "- App: $app_tag"
             echo "- Module: $module_tag"
+            echo "- Channel: $CHANNEL"
             echo "- Source repositories: 15"
             echo "- Every downloadable artifact has a SHA-256 checksum and build-manifest.json."
           } >> "$GITHUB_STEP_SUMMARY"

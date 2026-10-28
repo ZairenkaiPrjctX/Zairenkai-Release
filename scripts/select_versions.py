@@ -65,6 +65,46 @@ def choose(base: str, latest: list[str], prefix: str = "") -> str:
     return text(bump(newest))
 
 
+def choose_beta(base: str, latest: list[str], prefix: str = "") -> str:
+    """Choose the next beta for the next stable App version train."""
+    base_tuple = parse(base)
+    if base_tuple is None:
+        raise ValueError(f"invalid source version {base!r}")
+    published = [
+        v for tag in latest if tag.startswith(prefix)
+        if (v := parse(tag.removeprefix(prefix).removeprefix("v"))) is not None and v[3] is None
+    ]
+    newest = max(published, key=code) if published else None
+    target = stable(base_tuple)
+    if newest is not None and code(target) <= code(newest):
+        target = bump(newest)
+    beta_numbers = [
+        v[3] for tag in latest if tag.startswith(prefix)
+        if (v := parse(tag.removeprefix(prefix).removeprefix("v"))) is not None
+        and v[3] is not None and stable(v) == target
+    ]
+    next_beta = max(beta_numbers, default=0) + 1
+    if next_beta > 98:
+        raise ValueError(f"beta sequence for {text(target)} is exhausted")
+    return text((*target[:3], next_beta))
+
+
+def choose_module(base: str, latest: list[str]) -> str:
+    """Reserve a unique module version across stable and beta releases."""
+    base_tuple = parse(base)
+    if base_tuple is None:
+        raise ValueError(f"invalid source module version {base!r}")
+    published = [
+        v for tag in latest if tag.startswith("module-v")
+        if (v := parse(tag.removeprefix("module-v"))) is not None
+    ]
+    newest = max(published, key=code) if published else None
+    target = stable(base_tuple)
+    if newest is not None and code(target) <= code(newest):
+        target = bump(newest)
+    return text(target)
+
+
 def releases() -> list[str]:
     url = f"https://api.github.com/repos/{OWNER_REPO}/releases?per_page=100"
     headers = {
@@ -90,6 +130,7 @@ def main() -> int:
     parser.add_argument("--app-gradle", type=Path, required=True)
     parser.add_argument("--module-lock", type=Path, required=True)
     parser.add_argument("--release-list", type=Path, help="JSON array of tags, useful for offline testing")
+    parser.add_argument("--channel", choices=("stable", "beta"), default="stable")
     args = parser.parse_args()
     try:
         gradle = args.app_gradle.read_text(encoding="utf-8")
@@ -98,8 +139,8 @@ def main() -> int:
             raise ValueError("app/build.gradle.kts has no source appVersion")
         module = json.loads(args.module_lock.read_text(encoding="utf-8"))["module"]["version"]
         tags = json.loads(args.release_list.read_text(encoding="utf-8")) if args.release_list else releases()
-        app_version = choose(match.group(1), tags)
-        module_version = choose(module, tags, prefix="module-v")
+        app_version = choose_beta(match.group(1), tags) if args.channel == "beta" else choose(match.group(1), tags)
+        module_version = choose_module(module, tags)
     except (OSError, json.JSONDecodeError, KeyError, ValueError, RuntimeError) as exc:
         print(f"select_versions: {exc}", file=sys.stderr)
         return 1

@@ -13,6 +13,7 @@ import resolve_sources
 import select_versions
 import create_build_manifest
 import refresh_module_catalog_fixture
+import has_source_changes
 
 
 class SourceMatrixTests(unittest.TestCase):
@@ -49,6 +50,17 @@ class VersionSelectionTests(unittest.TestCase):
     def test_source_version_ahead_of_release_is_preserved(self):
         self.assertEqual("1.3.0", select_versions.choose("1.3.0-beta.2", ["v1.2.9"]))
 
+    def test_beta_versions_advance_in_order_and_reserve_module_versions(self):
+        tags = ["v0.1.0", "v0.2.0-beta.1", "v0.2.0-beta.2", "module-v0.3.2"]
+        self.assertEqual("0.2.0-beta.3", select_versions.choose_beta("0.2.0-beta.1", tags))
+        self.assertEqual("0.2.1-beta.1", select_versions.choose_beta("0.2.0", [*tags, "v0.2.0"]))
+        self.assertEqual("0.3.3", select_versions.choose_module("0.3.2", tags))
+        self.assertEqual("0.3.3", select_versions.choose_module("0.3.2", [*tags, "module-v0.3.2"]))
+
+    def test_beta_counter_stops_at_supported_app_version_limit(self):
+        with self.assertRaisesRegex(ValueError, "beta sequence.*exhausted"):
+            select_versions.choose_beta("0.2.0", [f"v0.2.0-beta.{n}" for n in range(1, 99)])
+
 
 class BuildManifestTests(unittest.TestCase):
     def test_manifest_binds_matrix_builder_and_artifact_hashes(self):
@@ -70,6 +82,7 @@ class BuildManifestTests(unittest.TestCase):
                                                      app_sha, modules_sha, builder_sha,
                                                      app, module, components)
             self.assertEqual(builder_sha, manifest["builder"]["commit"])
+            self.assertEqual("stable", manifest["channel"])
             self.assertEqual(app_sha, manifest["source_repositories"]["Zairenkai-App"]["commit"])
             self.assertEqual(2, len(manifest["artifacts"]))
             self.assertTrue((output / "build-manifest.json.sha256").is_file())
@@ -144,6 +157,21 @@ class WorkflowCatalogFixtureTests(unittest.TestCase):
         self.assertLess(verify, align)
         self.assertLess(align, app_tests)
         self.assertIn("scripts/refresh_module_catalog_fixture.py --app app", workflow)
+        self.assertIn("options: [stable, beta]", workflow)
+        self.assertIn("release_flags+=(--prerelease)", workflow)
+
+
+class StableSourceChangeTests(unittest.TestCase):
+    def test_prerelease_module_does_not_count_as_latest_stable_module(self):
+        from unittest.mock import patch
+        import tempfile
+        releases = [{"tag_name": "module-v0.3.4", "prerelease": True,
+                     "assets": [{"name": "zairenkai-v0.3.4.zip"}]}]
+        with tempfile.TemporaryDirectory() as tmp:
+            matrix = Path(tmp) / "matrix.json"
+            matrix.write_text(json.dumps({"repositories": []}), encoding="utf-8")
+            with patch.object(has_source_changes, "request", return_value=json.dumps(releases).encode()):
+                self.assertTrue(has_source_changes.has_changes(matrix))
 
 
 if __name__ == "__main__":
