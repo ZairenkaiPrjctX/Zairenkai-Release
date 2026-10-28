@@ -45,3 +45,5 @@ Actions; App and Modules supply their own Gradle, Python, Android NDK, Rust, and
 
 App and root-module updater clients consume this repository's release feed. The build matrix lists
 their source repositories and their direct components in `build/repositories.json`.
+
+- Latest verified release failure (run 40561867253): `SystemModuleCatalogContractTest` compared a checked-in module catalog fixture from an older source revision with the immutable `dev` matrix lock. The release workflow now verifies the built catalog commit against that lock and aligns the temporary App test fixture before Gradle tests; builder regression tests cover matching and mismatching commits. This workflow change has not yet run in GitHub Actions.

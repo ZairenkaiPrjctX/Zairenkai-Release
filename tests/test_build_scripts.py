@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import resolve_sources
 import select_versions
 import create_build_manifest
+import refresh_module_catalog_fixture
 
 
 class SourceMatrixTests(unittest.TestCase):
@@ -90,6 +91,50 @@ class BuildManifestTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "does not match"):
                 create_build_manifest.create(matrix, root / "out", "1.0.0", "0.1.0",
                                              "d" * 40, "b" * 40, "c" * 40, *artifacts)
+
+
+class ModuleCatalogFixtureTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.temp = tempfile.TemporaryDirectory()
+        self.app = Path(self.temp.name)
+        self.lock = self.app / "integration/repository-lock.json"
+        self.catalog = self.app / "integration/out/assets/system-modules.json"
+        self.fixture = self.app / "integration-core/src/test/resources/contracts/system-modules/catalog.json"
+        self.lock.parent.mkdir(parents=True)
+        self.catalog.parent.mkdir(parents=True)
+        self.fixture.parent.mkdir(parents=True)
+        self.fixture.write_text("old fixture", encoding="utf-8")
+        self.commit = "a" * 40
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def write_inputs(self, catalog_commit):
+        self.lock.write_text(json.dumps({"components": [{"id": "zairenkai-module", "commit": self.commit}]}), encoding="utf-8")
+        self.catalog.write_text(json.dumps({"modules": [{"id": "zairenkai", "source": {"commit": catalog_commit}}]}), encoding="utf-8")
+
+    def test_refreshes_fixture_from_catalog_matching_locked_matrix(self):
+        self.write_inputs(self.commit)
+        self.assertEqual(self.commit, refresh_module_catalog_fixture.refresh(self.app))
+        self.assertEqual(self.catalog.read_bytes(), self.fixture.read_bytes())
+
+    def test_rejects_catalog_from_different_matrix_without_changing_fixture(self):
+        self.write_inputs("b" * 40)
+        with self.assertRaisesRegex(ValueError, "does not match locked commit"):
+            refresh_module_catalog_fixture.refresh(self.app)
+        self.assertEqual("old fixture", self.fixture.read_text(encoding="utf-8"))
+
+
+class WorkflowCatalogFixtureTests(unittest.TestCase):
+    def test_fixture_is_aligned_after_component_verification_and_before_app_tests(self):
+        workflow = (ROOT / ".github/workflows/unified-release.yml").read_text(encoding="utf-8")
+        verify = workflow.index("name: Verify the full integration lock and built components")
+        align = workflow.index("name: Align module catalog test fixture with this source matrix")
+        app_tests = workflow.index("name: Test, lint, and build the signed App")
+        self.assertLess(verify, align)
+        self.assertLess(align, app_tests)
+        self.assertIn("scripts/refresh_module_catalog_fixture.py --app app", workflow)
 
 
 if __name__ == "__main__":
