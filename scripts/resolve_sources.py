@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -24,6 +25,9 @@ def resolve(owner: str, name: str, ref: str) -> dict[str, str]:
         "User-Agent": "Zairenkai-Release-source-matrix/1.0",
         "X-GitHub-Api-Version": "2022-11-28",
     }
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, headers=headers)
     error = None
     for attempt in range(3):
@@ -35,6 +39,25 @@ def resolve(owner: str, name: str, ref: str) -> dict[str, str]:
             if not SHA.fullmatch(sha) or f"github.com/{owner}/{name}/commit/{sha}" not in html:
                 raise ValueError(f"GitHub returned a malformed or foreign commit for {owner}/{name}/{ref}")
             return {"repository": f"{owner}/{name}", "name": name, "ref": ref, "sha": sha, "url": html}
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace").lower()
+            rate_limited = exc.code == 429 or (
+                exc.code == 403 and ("rate limit" in body or exc.headers.get("X-RateLimit-Remaining") == "0")
+            )
+            if not rate_limited:
+                raise RuntimeError(f"GitHub API rejected {owner}/{name}/{ref} with HTTP {exc.code}") from exc
+            error = RuntimeError(f"GitHub API rate limit exceeded for {owner}/{name}/{ref}")
+            if attempt < 2:
+                try:
+                    retry_after = int(exc.headers.get("Retry-After", "0"))
+                    reset_at = int(exc.headers.get("X-RateLimit-Reset", "0"))
+                except ValueError:
+                    retry_after, reset_at = 0, 0
+                delay = max(retry_after, reset_at - int(time.time()), 2 << attempt)
+                if delay <= 60:
+                    time.sleep(delay)
+                    continue
+            break
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
             error = exc
             if attempt < 2:

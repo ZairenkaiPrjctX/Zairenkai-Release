@@ -41,6 +41,22 @@ class SourceMatrixTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 resolve_sources.resolve("owner", "repo", "dev")
 
+    def test_source_resolver_authenticates_with_actions_token(self):
+        import os
+        from unittest.mock import patch
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *args): return None
+            def read(self):
+                sha = "a" * 40
+                return json.dumps({"sha": sha, "html_url": f"https://github.com/owner/repo/commit/{sha}"}).encode()
+        def authenticated(request, timeout):
+            self.assertEqual("Bearer actions-token", request.get_header("Authorization"))
+            return Response()
+        with patch.dict(os.environ, {"GH_TOKEN": "actions-token"}), \
+             patch.object(resolve_sources.urllib.request, "urlopen", side_effect=authenticated):
+            self.assertEqual("a" * 40, resolve_sources.resolve("owner", "repo", "dev")["sha"])
+
 
 class VersionSelectionTests(unittest.TestCase):
     def test_versions_advance_monotonically_and_ignore_other_tag_families(self):
@@ -234,6 +250,8 @@ class WorkflowCatalogFixtureTests(unittest.TestCase):
         self.assertLess(stage, app_build)
         self.assertIn("--latest=false", workflow)
         self.assertIn("SHA256SUMS-model", workflow)
+        self.assertIn("GH_TOKEN: ${{ github.token }}", workflow)
+        self.assertIn('if [ -n "$dispatch_channel" ]; then', workflow)
 
 
 class StableSourceChangeTests(unittest.TestCase):

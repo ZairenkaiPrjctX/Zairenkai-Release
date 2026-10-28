@@ -25,7 +25,8 @@ channel, every source commit and artifact SHA-256.
 
 ## Data flow and trust boundaries
 
-Source resolution uses the GitHub API. The configured source repositories are public. The matrix
+Source resolution uses the authenticated GitHub API token supplied by Actions, with explicit
+rate-limit handling. The configured source repositories are public. The matrix
 checks out exact commits and verifies each SHA before building. The builder then pins App and
 Modules locks to those same commits. Signing keys are read only in the protected `release` environment and removed
 from runner temporary storage before artifact upload. Build/test jobs have read-only repository
