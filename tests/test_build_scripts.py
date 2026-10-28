@@ -101,10 +101,14 @@ class ModuleCatalogFixtureTests(unittest.TestCase):
         self.lock = self.app / "integration/repository-lock.json"
         self.catalog = self.app / "integration/out/assets/system-modules.json"
         self.fixture = self.app / "integration-core/src/test/resources/contracts/system-modules/catalog.json"
+        self.core_fixture = self.app / "integration-core/src/test/resources/contracts/core/modules-installed.json"
         self.lock.parent.mkdir(parents=True)
         self.catalog.parent.mkdir(parents=True)
         self.fixture.parent.mkdir(parents=True)
+        self.core_fixture.parent.mkdir(parents=True)
         self.fixture.write_text("old fixture", encoding="utf-8")
+        self.core_fixture.write_text(json.dumps({"result": [{"id": "zairenkai", "version": {
+            "major": 0, "minor": 3, "patch": 1}}]}), encoding="utf-8")
         self.commit = "a" * 40
 
     def tearDown(self):
@@ -112,18 +116,23 @@ class ModuleCatalogFixtureTests(unittest.TestCase):
 
     def write_inputs(self, catalog_commit):
         self.lock.write_text(json.dumps({"components": [{"id": "zairenkai-module", "commit": self.commit}]}), encoding="utf-8")
-        self.catalog.write_text(json.dumps({"modules": [{"id": "zairenkai", "source": {"commit": catalog_commit}}]}), encoding="utf-8")
+        self.catalog.write_text(json.dumps({"modules": [{"id": "zairenkai", "version": "v0.3.2",
+            "source": {"commit": catalog_commit}}]}), encoding="utf-8")
 
     def test_refreshes_fixture_from_catalog_matching_locked_matrix(self):
         self.write_inputs(self.commit)
         self.assertEqual(self.commit, refresh_module_catalog_fixture.refresh(self.app))
         self.assertEqual(self.catalog.read_bytes(), self.fixture.read_bytes())
+        core = json.loads(self.core_fixture.read_text(encoding="utf-8"))
+        self.assertEqual({"major": 0, "minor": 3, "patch": 2}, core["result"][0]["version"])
 
     def test_rejects_catalog_from_different_matrix_without_changing_fixture(self):
         self.write_inputs("b" * 40)
         with self.assertRaisesRegex(ValueError, "does not match locked commit"):
             refresh_module_catalog_fixture.refresh(self.app)
         self.assertEqual("old fixture", self.fixture.read_text(encoding="utf-8"))
+        core = json.loads(self.core_fixture.read_text(encoding="utf-8"))
+        self.assertEqual({"major": 0, "minor": 3, "patch": 1}, core["result"][0]["version"])
 
 
 class WorkflowCatalogFixtureTests(unittest.TestCase):
