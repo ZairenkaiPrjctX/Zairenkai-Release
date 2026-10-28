@@ -46,7 +46,7 @@ def has_changes(matrix_path: Path) -> bool:
 
     app_release = first_release(lambda r: re.fullmatch(r"v\d+\.\d+\.\d+", str(r.get("tag_name", "")))
                                 and any(a.get("name", "").endswith(".apk") for a in r.get("assets", [])))
-    module_release = first_release(lambda r: str(r.get("tag_name", "")).startswith("module-v")
+    module_release = first_release(lambda r: not r.get("prerelease") and str(r.get("tag_name", "")).startswith("module-v")
                                    and any(a.get("name", "").endswith(".zip") for a in r.get("assets", [])))
     if app_release is None or module_release is None:
         return True

@@ -4,8 +4,10 @@
 
 `unified-release.yml` resolves the `dev` heads of the configured Zairenkai repositories to
 immutable commits, verifies each checkout in a GitHub Actions matrix, and builds one integrated
-Android APK and one installable root module. Successful products are published as immutable GitHub
-Releases in this repository. Release manifests bind every source commit and artifact SHA-256.
+Android APK and one installable root module. Stable builds run on the schedule/source updates;
+maintainers can dispatch the same pipeline for a beta build. Successful products are published as
+separate stable or prerelease GitHub Releases in this repository. Release manifests bind the
+channel, every source commit and artifact SHA-256.
 
 ## Components
 
@@ -27,10 +29,11 @@ checks out exact commits and verifies each SHA before building. The builder then
 Modules locks to those same commits. Signing keys are read only in the protected `release` environment and removed
 from runner temporary storage before artifact upload. Build/test jobs have read-only repository
 permissions. Only the final publish job receives `contents: write` and publishes two immutable
-product releases; it refuses an existing tag.
+product releases; beta builds mark both products as prereleases. It refuses an existing tag.
 
 The module release is published before the App release. Both include `update.json`, so the latest
-App release also serves as the central module update feed expected by clients. Public client access
+stable App release also serves as the central stable module update feed expected by root managers.
+The App's Beta channel can read both App and module prereleases. Public client access
 requires this repository and its releases to be public; repository visibility is an administrator
 setting and is not changed by this workflow.
 
@@ -39,4 +42,4 @@ setting and is not changed by this workflow.
 The workflow builds `zairenkai-<version>.apk` and `zairenkai-v<version>.zip`, with individual
 checksums, `SHA256SUMS`, update metadata and a shared `build-manifest.json`. The manifest records
 the complete configured source matrix, including the builder commit, and SHA-256/size for both
-products. Build staging is ephemeral and only release assets are retained.
+products and channel. Build staging is ephemeral and only release assets are retained.

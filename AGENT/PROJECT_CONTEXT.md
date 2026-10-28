@@ -37,6 +37,10 @@ Actions; App and Modules supply their own Gradle, Python, Android NDK, Rust, and
   `ZAIRENKAI_RELEASE_KEY_PASSWORD`. Names are documented; secret values are not inspected/copied.
 - Scheduled workflows run only from GitHub's configured default branch. Verify that `dev` is
   still the default branch when rolling out this workflow.
+- The integrated workflow supports manual `stable` and `beta` channels. Beta publishes the paired
+  signed App APK and module ZIP as two GitHub prereleases from the same verified source matrix;
+  the App's Beta channel offers the APK and recognizes the matching module prerelease. This
+  capability is implemented in the current topic change; no beta release has been published.
 - Workflow release publishing has not been run. App/Modules client updates, signed outputs,
   hardware behavior, and public feed access remain unverified until a successful release and
   device validation.
