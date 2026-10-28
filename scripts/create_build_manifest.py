@@ -25,7 +25,8 @@ def digest(path: Path) -> str:
 
 def create(matrix_path: Path, output: Path, app_version: str, module_version: str,
            app_commit: str, module_commit: str, builder_commit: str, apk: Path, module_zip: Path,
-           component_manifest: Path, channel: str = "stable") -> dict:
+           component_manifest: Path, channel: str = "stable", model: Path | None = None,
+           model_manifest: Path | None = None) -> dict:
     if channel not in {"stable", "beta"}:
         raise ValueError("release channel must be stable or beta")
     if not all(SHA1.fullmatch(value) for value in (app_commit, module_commit, builder_commit)):
@@ -44,6 +45,36 @@ def create(matrix_path: Path, output: Path, app_version: str, module_version: st
         raise ValueError("App checkout does not match its source matrix entry")
     if sources.get("Zairenkai-Modules", {}).get("commit") != module_commit:
         raise ValueError("Modules checkout does not match its source matrix entry")
+    if (model is None) != (model_manifest is None):
+        raise ValueError("model and model_manifest must be supplied together")
+    model_record = None
+    if model is not None and model_manifest is not None:
+        engine_commit = sources.get("Zairenkai-Intelligence-Engine", {}).get("commit")
+        model_data = json.loads(model_manifest.read_text(encoding="utf-8"))
+        if not isinstance(model_data, dict):
+            raise ValueError("GGUF manifest must be a JSON object")
+        engine = model_data.get("engine", {})
+        release = model_data.get("release", {})
+        source = model_data.get("source", {})
+        files = model_data.get("files", [])
+        if not all(isinstance(value, dict) for value in (engine, release, source)):
+            raise ValueError("GGUF manifest engine, release, and source fields must be objects")
+        if not isinstance(files, list) or engine.get("commit") != engine_commit or len(files) != 1:
+            raise ValueError("GGUF manifest does not bind to the Engine source matrix")
+        if release.get("repository") != "ZairenkaiPrjctX/Zairenkai-Release":
+            raise ValueError("GGUF release must point to the central Release repository")
+        if release.get("tag") != f"model-{model_data.get('model_id')}-{engine_commit}":
+            raise ValueError("GGUF release tag does not bind to the Engine matrix commit")
+        if not SHA1.fullmatch(source.get("revision", "")):
+            raise ValueError("GGUF source revision must be an immutable full SHA")
+        item = files[0]
+        if not isinstance(item, dict) or model.stat().st_size != item.get("size_bytes") or digest(model) != item.get("sha256"):
+            raise ValueError("GGUF bytes do not match the Engine manifest")
+        model_record = {
+            "id": model_data["model_id"], "engine_commit": engine_commit,
+            "source_revision": model_data["source"]["revision"], "release_tag": release["tag"],
+            "file": model.name, "size_bytes": model.stat().st_size, "sha256": digest(model),
+        }
     components = json.loads(component_manifest.read_text(encoding="utf-8"))
     if not isinstance(components, dict):
         raise ValueError("component provenance file is not a JSON object")
@@ -58,6 +89,9 @@ def create(matrix_path: Path, output: Path, app_version: str, module_version: st
             target.write_bytes(path.read_bytes())
         artifacts.append({"name": target.name, "size_bytes": target.stat().st_size, "sha256": digest(target)})
         (output / f"{target.name}.sha256").write_text(f"{digest(target)}  {target.name}\n", encoding="ascii")
+    if model is not None:
+        model_record["file"] = model.name
+        artifacts.append({"name": model.name, "size_bytes": model.stat().st_size, "sha256": digest(model), "kind": "gguf"})
     manifest = {
         "format": 1,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -73,6 +107,8 @@ def create(matrix_path: Path, output: Path, app_version: str, module_version: st
         "artifacts": artifacts,
         "verification": {"matrix": "passed", "integration": "passed", "release_gate": "passed", "signature": "passed"},
     }
+    if model_record is not None:
+        manifest["model"] = model_record
     manifest_path = output / "build-manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     (output / "build-manifest.json.sha256").write_text(f"{digest(manifest_path)}  build-manifest.json\n", encoding="ascii")
@@ -94,11 +130,13 @@ def main() -> int:
     parser.add_argument("--module-zip", type=Path, required=True)
     parser.add_argument("--components", type=Path, required=True)
     parser.add_argument("--channel", choices=("stable", "beta"), default="stable")
+    parser.add_argument("--model", type=Path)
+    parser.add_argument("--model-manifest", type=Path)
     args = parser.parse_args()
     try:
         manifest = create(args.matrix, args.output, args.app_version, args.module_version, args.app_commit,
                           args.module_commit, args.builder_commit, args.apk, args.module_zip, args.components,
-                          args.channel)
+                          args.channel, args.model, args.model_manifest)
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
         print(f"create_build_manifest: {exc}", file=sys.stderr)
         return 1

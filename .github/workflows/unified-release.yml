@@ -263,6 +263,30 @@ jobs:
         run: |
           python3 integration/scripts/verify_integration.py lock
           python3 integration/scripts/verify_integration.py build
+      - name: Prepare and verify the GGUF pinned by this Engine matrix commit
+        id: model
+        env:
+          ENGINE_COMMIT: ${{ needs.resolve.outputs.engine_commit }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/gguf"
+          python3 scripts/stage_gguf.py prepare \
+            --manifest engine-source/models/qwen2.5-0.5b-instruct-q4_0.json \
+            --app-manifest app/integration/out/assets/intelligence/model.json \
+            --prepared-manifest "$RUNNER_TEMP/gguf/model.json" \
+            --engine-commit "$ENGINE_COMMIT" --release-repository "$GITHUB_REPOSITORY" \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Download the pinned GGUF and its source licence
+        run: |
+          curl --fail --show-error --location --retry 8 --retry-all-errors --retry-delay 5 --connect-timeout 30 --max-time 1800 \
+            "${{ steps.model.outputs.model_url }}" -o "$RUNNER_TEMP/gguf/model.gguf"
+          curl --fail --show-error --location --retry 8 --retry-all-errors --retry-delay 5 --connect-timeout 30 --max-time 180 \
+            "${{ steps.model.outputs.license_url }}" -o "$RUNNER_TEMP/gguf/LICENSE"
+      - name: Verify and stage the GGUF release assets
+        run: |
+          python3 scripts/stage_gguf.py stage --manifest "$RUNNER_TEMP/gguf/model.json" \
+            --model "$RUNNER_TEMP/gguf/model.gguf" --license "$RUNNER_TEMP/gguf/LICENSE" \
+            --output "$RUNNER_TEMP/release-stage/model-release"
+          (cd "$RUNNER_TEMP/release-stage/model-release" && sha256sum -c SHA256SUMS)
       - name: Align module catalog test fixture with this source matrix
         run: python3 scripts/refresh_module_catalog_fixture.py --app app
       - name: Test, lint, and build the signed App
@@ -290,6 +314,7 @@ jobs:
           MODULE_COMMIT: ${{ needs.resolve.outputs.modules_commit }}
           BUILDER_COMMIT: ${{ github.sha }}
           CHANNEL: ${{ needs.resolve.outputs.channel }}
+          MODEL_FILENAME: ${{ steps.model.outputs.model_filename }}
         run: |
           stage="$RUNNER_TEMP/release-stage"
           module_out=integration/out/src/zairenkai-module/dist
@@ -312,7 +337,9 @@ jobs:
             --channel "$CHANNEL" \
             --apk "$stage/zairenkai-${APP_VERSION}.apk" \
             --module-zip "$stage/zairenkai-v${MODULE_VERSION}.zip" \
-            --components integration/out/components.json
+            --components integration/out/components.json \
+            --model "$stage/model-release/$MODEL_FILENAME" \
+            --model-manifest "$RUNNER_TEMP/gguf/model.json"
           { cd "$stage"; sha256sum "zairenkai-${APP_VERSION}.apk" "zairenkai-${APP_VERSION}.apk.sha256" \
             build-manifest.json build-manifest.json.sha256 update.json app-notes.md > SHA256SUMS-app; }
           { cd "$stage"; sha256sum "zairenkai-v${MODULE_VERSION}.zip" "zairenkai-v${MODULE_VERSION}.zip.sha256" \
@@ -324,6 +351,8 @@ jobs:
           cp "$stage/zairenkai-v${MODULE_VERSION}.zip" "$stage/zairenkai-v${MODULE_VERSION}.zip.sha256" \
             "$stage/build-manifest.json" "$stage/build-manifest.json.sha256" "$stage/update.json" \
             "$stage/changelog.md" "$stage/SHA256SUMS-module" "$stage/module-release/"
+          cp "$stage/build-manifest.json" "$stage/build-manifest.json.sha256" "$stage/model-release/"
+          { cd "$stage/model-release"; sha256sum *.gguf *.LICENSE.txt *.manifest.json build-manifest.json build-manifest.json.sha256 > SHA256SUMS-model; }
           cp "$RUNNER_TEMP/matrix/source-heads.json" "$stage/source-heads.json"
       - name: Remove signing material
         if: always()
@@ -336,7 +365,7 @@ jobs:
           retention-days: 7
 
   publish:
-    name: publish central ${{ needs.resolve.outputs.channel }} App and Modules releases
+    name: publish central ${{ needs.resolve.outputs.channel }} App, Modules, and model releases
     needs: [build, resolve, detect-changes]
     if: needs.detect-changes.outputs.changed == 'true'
     runs-on: ubuntu-24.04
@@ -353,6 +382,7 @@ jobs:
           CHANNEL: ${{ needs.resolve.outputs.channel }}
         run: |
           (cd release-candidate && sha256sum -c SHA256SUMS-app && sha256sum -c SHA256SUMS-module)
+          (cd release-candidate/model-release && sha256sum -c SHA256SUMS-model)
           python3 - <<'PY'
           import json, pathlib
           p = pathlib.Path('release-candidate/build-manifest.json')
@@ -362,17 +392,19 @@ jobs:
           assert d['channel'] == __import__('os').environ['CHANNEL']
           print('verified release manifest for', d['app']['version'], d['module']['version'])
           PY
-      - name: Publish the module first, then the App with the same update feed
+      - name: Publish the matrix-pinned model, module, then App
         env:
           GH_TOKEN: ${{ github.token }}
           CHANNEL: ${{ needs.resolve.outputs.channel }}
         run: |
           app_version=$(python3 -c 'import json; print(json.load(open("release-candidate/build-manifest.json"))["app"]["version"])')
           module_version=$(python3 -c 'import json; print(json.load(open("release-candidate/build-manifest.json"))["module"]["version"])')
+          model_tag=$(python3 -c 'import json; print(json.load(open("release-candidate/build-manifest.json"))["model"]["release_tag"])')
           module_tag="module-v${module_version}"
           app_tag="v${app_version}"
           module_title="Zairenkai Module $module_version"
           app_title="Zairenkai $app_version"
+          model_release_flags=(--latest=false)
           release_flags=()
           if [ "$CHANNEL" = beta ]; then
             release_flags+=(--prerelease)
@@ -387,6 +419,24 @@ jobs:
           fi
           if gh release view "$app_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "::error::Refusing to replace immutable App release $app_tag"; exit 1
+          fi
+          model_dir=release-candidate/model-release
+          if gh release view "$model_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            existing="$RUNNER_TEMP/existing-model-manifest.json"
+            gh release download "$model_tag" --repo "$GITHUB_REPOSITORY" \
+              --pattern '*.manifest.json' --pattern '*.gguf' --pattern 'SHA256SUMS' \
+              --pattern 'SHA256SUMS-model' --pattern 'build-manifest.json' \
+              --pattern 'build-manifest.json.sha256' --dir "$RUNNER_TEMP/existing-model"
+            (cd "$RUNNER_TEMP/existing-model" && sha256sum -c SHA256SUMS && sha256sum -c SHA256SUMS-model)
+            cp "$RUNNER_TEMP"/existing-model/*.manifest.json "$existing"
+            cmp "$existing" "$model_dir"/*.manifest.json || { echo "::error::Existing model tag has different pinned provenance"; exit 1; }
+            echo "Verified existing immutable GGUF release $model_tag"
+          else
+            gh release create "$model_tag" --repo "$GITHUB_REPOSITORY" --title "Zairenkai GGUF $model_tag" \
+              "${model_release_flags[@]}" --target "$GITHUB_SHA" --notes-file "$model_dir/notes.md" \
+              "$model_dir"/*.gguf "$model_dir"/*.LICENSE.txt "$model_dir"/*.manifest.json \
+              "$model_dir/SHA256SUMS" "$model_dir/SHA256SUMS-model" \
+              "$model_dir/build-manifest.json" "$model_dir/build-manifest.json.sha256"
           fi
           gh release create "$module_tag" --repo "$GITHUB_REPOSITORY" --title "$module_title" \
             "${release_flags[@]}" \
@@ -407,6 +457,7 @@ jobs:
             echo "## Published central matrix release"
             echo "- App: $app_tag"
             echo "- Module: $module_tag"
+            echo "- GGUF model: $model_tag"
             echo "- Channel: $CHANNEL"
             echo "- Source repositories: 15"
             echo "- Every downloadable artifact has a SHA-256 checksum and build-manifest.json."

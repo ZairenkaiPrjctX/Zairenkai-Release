@@ -14,6 +14,7 @@ import select_versions
 import create_build_manifest
 import refresh_module_catalog_fixture
 import has_source_changes
+import stage_gguf
 
 
 class SourceMatrixTests(unittest.TestCase):
@@ -105,6 +106,68 @@ class BuildManifestTests(unittest.TestCase):
                 create_build_manifest.create(matrix, root / "out", "1.0.0", "0.1.0",
                                              "d" * 40, "b" * 40, "c" * 40, *artifacts)
 
+    def test_manifest_records_gguf_only_when_engine_sha_matches_matrix(self):
+        import hashlib
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine_sha = "e" * 40
+            matrix = root / "matrix.json"
+            matrix.write_text(json.dumps({"ref": "dev", "repositories": [
+                {"name": "Zairenkai-App", "sha": "a" * 40, "repository": "owner/app", "ref": "dev", "role": "app"},
+                {"name": "Zairenkai-Modules", "sha": "b" * 40, "repository": "owner/modules", "ref": "dev", "role": "module"},
+                {"name": "Zairenkai-Intelligence-Engine", "sha": engine_sha, "repository": "owner/engine", "ref": "dev", "role": "engine"},
+            ]}), encoding="utf-8")
+            apk, module, components, model = (root / name for name in ("app.apk", "module.zip", "components.json", "model.gguf"))
+            apk.write_bytes(b"apk")
+            module.write_bytes(b"module")
+            components.write_text("{}", encoding="utf-8")
+            model.write_bytes(b"verified gguf")
+            model_manifest = root / "model.json"
+            model_manifest.write_text(json.dumps({
+                "model_id": "test_model", "engine": {"commit": engine_sha},
+                "release": {"repository": "ZairenkaiPrjctX/Zairenkai-Release", "tag": f"model-test_model-{engine_sha}"},
+                "source": {"revision": "f" * 40}, "files": [{
+                    "size_bytes": model.stat().st_size,
+                    "sha256": hashlib.sha256(model.read_bytes()).hexdigest(),
+                }],
+            }), encoding="utf-8")
+            result = create_build_manifest.create(matrix, root / "out", "1.0.0", "0.1.0",
+                "a" * 40, "b" * 40, "c" * 40, apk, module, components,
+                model=model, model_manifest=model_manifest)
+            self.assertEqual(engine_sha, result["model"]["engine_commit"])
+            self.assertEqual(hashlib.sha256(model.read_bytes()).hexdigest(), result["model"]["sha256"])
+            self.assertEqual("gguf", result["artifacts"][-1]["kind"])
+
+
+class GgufStagingTests(unittest.TestCase):
+    def test_prepare_and_stage_pinned_model(self):
+        import hashlib
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model_bytes = b"small fixture model"
+            manifest = root / "engine-model.json"
+            manifest.write_text(json.dumps({
+                "schema_version": 1, "model_id": "test_model", "display_name": "Fixture",
+                "format": "gguf", "files": [{"name": "fixture.gguf", "sha256": hashlib.sha256(model_bytes).hexdigest(), "size_bytes": len(model_bytes)}],
+                "source": {"url": "https://huggingface.co/owner/model", "revision": "f" * 40},
+                "licenses": {"weights": "Apache-2.0", "tokenizer": "Apache-2.0", "config": "Apache-2.0"},
+            }), encoding="utf-8")
+            app_manifest, prepared = root / "app/model.json", root / "prepared.json"
+            urls = stage_gguf.prepare(manifest, app_manifest, prepared, "e" * 40, "ZairenkaiPrjctX/Zairenkai-Release")
+            self.assertEqual(f"model-test_model-{'e' * 40}", urls["tag"])
+            self.assertEqual(app_manifest.read_bytes(), prepared.read_bytes())
+            model, license_file = root / "model.gguf", root / "LICENSE"
+            model.write_bytes(model_bytes)
+            license_file.write_text("fixture license", encoding="utf-8")
+            assets = stage_gguf.stage(prepared, model, license_file, root / "stage")
+            self.assertTrue((root / "stage" / "SHA256SUMS").is_file())
+            self.assertTrue(any(path.name == "fixture.gguf" for path in assets))
+            model.write_bytes(b"x" * len(model_bytes))
+            with self.assertRaisesRegex(stage_gguf.StageError, "SHA-256"):
+                stage_gguf.stage(prepared, model, license_file, root / "bad-stage")
+
 
 class ModuleCatalogFixtureTests(unittest.TestCase):
     def setUp(self):
@@ -159,6 +222,18 @@ class WorkflowCatalogFixtureTests(unittest.TestCase):
         self.assertIn("scripts/refresh_module_catalog_fixture.py --app app", workflow)
         self.assertIn("options: [stable, beta]", workflow)
         self.assertIn("release_flags+=(--prerelease)", workflow)
+
+    def test_model_outputs_are_consumed_only_after_prepare_step(self):
+        workflow = (ROOT / ".github/workflows/unified-release.yml").read_text(encoding="utf-8")
+        prepare = workflow.index("id: model")
+        download = workflow.index("steps.model.outputs.model_url")
+        stage = workflow.index("name: Verify and stage the GGUF release assets")
+        app_build = workflow.index("name: Test, lint, and build the signed App")
+        self.assertLess(prepare, download)
+        self.assertLess(download, stage)
+        self.assertLess(stage, app_build)
+        self.assertIn("--latest=false", workflow)
+        self.assertIn("SHA256SUMS-model", workflow)
 
 
 class StableSourceChangeTests(unittest.TestCase):
