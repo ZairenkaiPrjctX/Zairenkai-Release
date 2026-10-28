@@ -27,6 +27,7 @@ def refresh(app: Path) -> str:
     lock_path = app / "integration/repository-lock.json"
     catalog_path = app / "integration/out/assets/system-modules.json"
     fixture_path = app / "integration-core/src/test/resources/contracts/system-modules/catalog.json"
+    core_fixture_path = app / "integration-core/src/test/resources/contracts/core/modules-installed.json"
 
     lock = read_json(lock_path)
     components = lock.get("components")
@@ -51,20 +52,44 @@ def refresh(app: Path) -> str:
     if actual != expected:
         raise ValueError(f"built zairenkai module commit {actual!r} does not match locked commit {expected}")
 
-    # Replace atomically so a failed/interrupted workflow cannot leave a partial fixture.
-    fixture_path.parent.mkdir(parents=True, exist_ok=True)
+    version = entries[0].get("version")
+    if not isinstance(version, str):
+        raise ValueError("built zairenkai module has no version string")
+    version_parts = version.removeprefix("v").split(".")
+    if len(version_parts) != 3 or any(not part.isdigit() for part in version_parts):
+        raise ValueError(f"built zairenkai module version {version!r} is not MAJOR.MINOR.PATCH")
+    version_numbers = [int(part) for part in version_parts]
+    if any(part > 99 for part in version_numbers):
+        raise ValueError(f"built zairenkai module version {version!r} is outside the Core contract range")
+
+    core_fixture = read_json(core_fixture_path)
+    result = core_fixture.get("result")
+    if not isinstance(result, list):
+        raise ValueError("Core modules-installed fixture has no result array")
+    core_modules = [row for row in result if isinstance(row, dict) and row.get("id") == "zairenkai"]
+    if len(core_modules) != 1:
+        raise ValueError("Core modules-installed fixture must contain exactly one zairenkai module")
+    core_modules[0]["version"] = dict(zip(("major", "minor", "patch"), version_numbers))
+
+    # Replace each temporary test fixture atomically after validating both contracts.
+    _atomic_write(fixture_path, catalog_path.read_bytes())
+    _atomic_write(core_fixture_path, (json.dumps(core_fixture, indent=2, ensure_ascii=False) + "\n").encode())
+    return expected
+
+
+def _atomic_write(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
     try:
-        with tempfile.NamedTemporaryFile(dir=fixture_path.parent, delete=False) as output:
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as output:
             temporary = Path(output.name)
-            output.write(catalog_path.read_bytes())
+            output.write(content)
             output.flush()
             os.fsync(output.fileno())
-        os.replace(temporary, fixture_path)
+        os.replace(temporary, path)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
-    return expected
 
 
 def main() -> int:
